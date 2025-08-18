@@ -1,0 +1,8 @@
+pandas
+matplotlib
+statsmodels
+scikit-learn
+prophet
+plotly
+tabulate
+ollama
