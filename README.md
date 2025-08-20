@@ -31,6 +31,11 @@ Para comenzar, es necesario "clonar" el repositorio con sus archivos localmente.
 - Moverse al directorio del proyecto con `$ cd Proyecto-Electrico`.
 - Si no fue hecho antes, configurar las credenciales de Git en el sistema local, con `$ git config --global user.name "Nombre Apellido"` y `$ git config --global user.email "your-email@example.com"`, de modo que quede vinculado con la cuenta de GitHub.
 
+### Descargar e instalar Ollama
+
+Seguir los pasos de descarga e instalación de Ollama desde su pagína según su sistema operativo. 
+https://ollama.com/download
+
 ### Crear un ambiente virtual de Python
 
 En una terminal, en el directorio raíz del repositorio, utilizar:
