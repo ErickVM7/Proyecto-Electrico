@@ -6,3 +6,7 @@ prophet
 plotly
 tabulate
 ollama
+langchain-community
+duckduckgo-search
+ddgs
+DDGS
