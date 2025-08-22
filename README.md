@@ -4,6 +4,7 @@ Los archivos incluidos en el repositorio original son:
 
 - `.venv`: configuración del entorno virtual
 - `requirements.txt`: especificación de las dependencias de paquetes de Python.
+- `problemas.txt`: Problemas encontrados en el desarrollo del proyecto.
 - `ProyectoElectrico_PrediccionEnTiempoReal.pdf`: Enunciado y objetivo del proyecto.
 - `env_prueba.py`: Archivo python para comprobar la correcta instalación del entorno virtual y sus respectivas librerías.
 - `datos_cence`:  Datos de CENCE de los últimos tres años
@@ -97,5 +98,6 @@ Para verificar la instalación, es posible usar nuevamente `pip list`, que ahora
 
 ### Para ejecutar el proyecto
 
-- En el directorio raíz, 
+- Se puede ejecutar el archivo env_prueba.py para verificar que se haya instalado correctamente el entorno virtual
+- El sistema básico basado en el trabajo de Mauro Di Pietro se encuentra en el archivo system_Mauro.py
 
