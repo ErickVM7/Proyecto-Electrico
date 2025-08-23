@@ -1,0 +1,34 @@
+## Tarea 1
+
+1. No se pudo instalar el modelo llamas3 o mastral completo debido a que la memoria y potencia de la compu no alcanzaba, por lo que se uso un modelo mas "lite" llamado "llama3.2:1b"
+
+2. Parámetros malformados en herramientas
+
+-   El modelo en ocasiones envía un JSON con properties en lugar de solo
+    { "text": ... }.
+
+-   Esto genera errores como:
+
+        final_answer() got an unexpected keyword argument 'properties'
+
+
+3. Uso incorrecto de final_answer en lugar de code_exec
+
+-   Ejemplo: “calcula promedio” devolvió solo:
+
+        Calculating the monthly sales average (y) from the given dataset.
+
+-   No hizo el cálculo, solo explicó.
+
+-   Causa: el modelo no eligió la herramienta correcta.
+
+-   Solución: reforzar el SYSTEM_PROMPT para indicar
+
+
+Soluciones generales
+
+1.  preguntas claras y específicas
+2.  Observar qué herramienta elige, si usa final_answer cuando debería
+    usar code_exec, reformula la pregunta o ajusta el prompt.
+3.  Mantener reglas estrictas en el prompt inicial
+4.  Ajuste de código para evitar errores a la hora de hacer prints en las respuestas
