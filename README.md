@@ -120,28 +120,33 @@ El artículo concluye que este enfoque democratiza el análisis de datos: cualqu
     
 2.  Interactuar con el agente
 
-    -   El usuario hace preguntas o solicitudes (ej: “calcula promedio”,
-        “grafica la media móvil”).
+    -   El usuario hace preguntas o solicitudes (ej: “calcula promedio”).
     -   El modelo decide si responde en texto (final_answer), ejecuta
         código (code_exec) o busca información (search_web).
 
 3.  Recepción de resultados
 
     -   Si se usa final_answer: devuelve texto.
-    -   Si se usa code_exec: ejecuta Python y devuelve la salida de
-        print(). Gráficos u otros archivos.
+    -   Si se usa code_exec: ejecuta Python y devuelve la salida de este código
     -   Si se usa search_web: devuelve un resumen de noticias
         relevantes.
 
 
 ## Estado actual del proyecto
 
-Este repositorio contiene la primera etapa del proyecto (**Tarea 1**), que corresponde a:
+Este repositorio contiene la primera etapa del proyecto (**Tarea 1 y 2**), que corresponde a:
 
 - Instalación y configuración del entorno virtual de Python.
 - Instalación y prueba de Ollama en local.
 - Implementación y prueba del sistema base propuesto por Mauro Di Pietro (`system_Mauro.py`), 
   el cual permite interactuar con un agente que procesa series de tiempo simples y dataframes en memoria.
+
+- Obtención de datos ICE (CENCE). (`obtencionDatos.py`)
+- Convertir los datos a un archivo .csv bien estructurado. (`datos_limpios.csv`)
+- Estandarizar formato de fechas y valores. (`datos_limpios.csv`)
+- Validar que los datos no tengan errores o vacíos.
+
+
 
 ## Para ejecutar el proyecto
 
