@@ -11,13 +11,23 @@ import string
 #Capturar salida
 import io
 import contextlib
+import re
 
 length = 1000
 
 #Conexión con Ollama
 
 import ollama
+import subprocess
+
+
+
 llm = "llama3.2:1b" #Modelo, se puede cambiar por llamas o Mastral
+#llm = "qwen2.5" 
+
+
+# Descargar (pull) el modelo antes de usarlo
+subprocess.run(["ollama", "pull", llm], check=False)
 
 stream = ollama.generate(model=llm, prompt='''can you analyze timeseries?''', stream=True)
 for chunk in stream:
@@ -75,30 +85,52 @@ print(dtf.describe())
 def final_answer(text:str) -> str:
     return text
 
-tool_final_answer = {'type':'function', 'function':{
-  'name': 'final_answer',
-  'description': 'Returns a natural language response to the user',
-  'parameters': {'type': 'object', 
-                 'required': ['text'],
-                 'properties': {'text': {'type':'str', 'description':'natural language response'}}
-}}}
-
+tool_final_answer = {
+  'type': 'function',
+  'function': {
+    'name': 'final_answer',
+    'description': 'Returns a natural language response to the user',
+    'parameters': {
+      'type': 'object',
+      'required': ['text'],
+      'properties': {
+        'text': {'type':'string', 'description':'natural language response'}
+      }
+    }
+  }
+}
 final_answer(text="hi")
 
 # Permite ejecutar código python dinamicamente
 #Devuelve texto
 
-def code_exec(code:str) -> str:
+# Sanitizador de código antes de ejecutar
+def sanitize_code(code: str) -> str:
+    # Forzar uso de dtf en lugar de df
+    code = code.replace("df[", "dtf[")
+
+    # Reemplazar funciones sueltas por métodos de pandas
+    code = re.sub(r"mean\((dtf\[.+?\])\)", r"\1.mean()", code)
+    code = re.sub(r"max\((dtf\[.+?\])\)", r"\1.max()", code)
+    code = re.sub(r"min\((dtf\[.+?\])\)", r"\1.min()", code)
+    code = re.sub(r"sum\((dtf\[.+?\])\)", r"\1.sum()", code)
+
+    # Asegurar nombres de columnas correctos según dtf
+    for col in dtf.columns:
+        code = code.replace(col.lower(), col).replace(col.upper(), col)
+
+    return code
+
+
+def code_exec(code: str) -> str:
+    code = sanitize_code(code)  # 👈 limpiar antes de ejecutar
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
         try:
-            # Fix: cambiar df['col'] por df["col"] para evitar error de comillas
-            code = code.replace("['", '["').replace("']", '"]')
             exec(code, globals())
         except Exception as e:
             print(f"Error: {e}")
     return output.getvalue()
-
 
 tool_code_exec = {'type':'function', 'function':{
   'name': 'code_exec',
@@ -145,27 +177,33 @@ search_web(query="nvidia")
 dic_tools = {"final_answer":final_answer, "code_exec":code_exec, "search_web":search_web}
 
 
-# Ejecuta la herramienta correspondiente a lo que se pide
-def use_tool(agent_res:dict, dic_tools:dict) -> dict:
+# Ejecuta la herramienta correspondiente
+def use_tool(agent_res: dict, dic_tools: dict) -> dict:
     msg = agent_res["message"]
+    res, t_name, t_inputs = "", "", ""
+
     if hasattr(msg, "tool_calls") and msg.tool_calls:
         for tool in msg.tool_calls:
             t_name, t_inputs = tool["function"]["name"], tool["function"]["arguments"]
+
+            # 👇 Mapeo para final_answer
+            if t_name == "final_answer" and "final_answer" in t_inputs:
+                t_inputs = {"text": t_inputs["final_answer"]}
+
             if f := dic_tools.get(t_name):
-                ### calling tool
                 print('🔧 >', f"\x1b[1;31m{t_name} -> Inputs: {t_inputs}\x1b[0m")
-                ### tool output
-                t_output = f(**tool["function"]["arguments"])
+                t_output = f(**t_inputs)
                 print(t_output)
-                ### final res
                 res = t_output
             else:
                 print('🤬 >', f"\x1b[1;31m{t_name} -> NotFound\x1b[0m")
-    ## don't use tool
-    if agent_res['message']['content'] != '':
-        res = agent_res["message"]["content"]
-        t_name, t_inputs = '', ''
-    return {'res':res, 'tool_used':t_name, 'inputs_used':t_inputs}
+
+    # Si no se usó herramienta → devolver mensaje normal
+    if msg.get("content", "") != "":
+        res = msg["content"]
+        t_name, t_inputs = "", ""
+
+    return {"res": res, "tool_used": t_name, "inputs_used": t_inputs}
 
 #Bucle principal del agente, llama otras herramientas y devuelve respuestas
 def run_agent(llm, messages, available_tools):
@@ -173,12 +211,9 @@ def run_agent(llm, messages, available_tools):
     while tool_used != 'final_answer':
         ### use tools
         try:
-            agent_res = ollama.chat(model=llm, 
-                                    messages=messages,
-                                    #format="json", #or schema
-                                    #stream=False,
-                                    #options={"num_ctx":2048},
-                                    tools=[v for v in available_tools.values()])
+            agent_res = ollama.chat(model=llm, messages=messages, format="json",   # 👈 evita respuestas ambiguas
+            tools=[v for v in available_tools.values()])
+
             dic_res = use_tool(agent_res, dic_tools)
             res, tool_used, inputs_used = dic_res["res"], dic_res["tool_used"], dic_res["inputs_used"]
         ### error
@@ -191,7 +226,7 @@ def run_agent(llm, messages, available_tools):
         if tool_used not in ['','final_answer']:
             local_memory += f"\nTool used: {tool_used}.\nInput used: {inputs_used}.\nOutput: {res}"
             messages.append( {"role":"assistant", "content":local_memory} )
-            available_tools.pop(tool_used)
+            available_tools.pop(tool_used, None)
             if len(available_tools) == 1:
                 messages.append( {"role":"user", "content":"now activate the tool final_answer."} )
         ### tools not used
@@ -214,15 +249,35 @@ You have access to the following tools:
 - tool 'code_exec' to execute Python code.
 - tool 'search_web' to search for information on the internet.
 
-Important:
-- The dataset is already loaded in memory as dtf. Never use df, always use dtf.
-- When you write pandas code, always use double quotes (") for column names.
+Important rules:
+- The dataset already exists and is called `dtf`. Never create a new dataset or variable with another name.
+- Always use **pandas methods** for calculations. 
+  Examples:
+    - Mean: dtf["Age"].mean()
+    - Maximum: dtf["Score"].max()
+    - Minimum: dtf["Age"].min()
+    - Sum: dtf["Score"].sum()
+- Never use standalone functions like mean(), max(), min(), sum(), etc. outside pandas.
+- Always use double quotes `"` for column names.  
   Example: dtf["Score"], not dtf['Score'].
-- Always wrap results you want to show with print(), otherwise they won't appear.
+- Always wrap results you want to show with `print()`, otherwise they will not appear.
+- Do not invent new functions or variables unless explicitly asked.
+- The DataFrame is ALWAYS called dtf. Never use df, data, dataset, or anything else.
+- All calculations must be done with dtf. Example: dtf["Age"].mean(), dtf["Score"].max().
+- Never return code like "final_answer". Only valid Python code should go into code_exec.
+
+Tool usage rules:
+- If the user asks for a value, a statistic, or a calculation, you MUST always call code_exec first to compute the result.
+- After executing the calculation with code_exec, you MUST use final_answer to provide a clear natural language explanation of the result.
+- Do not return final_answer without running code_exec first for any numeric/statistical request.
+- If the user asks for something unrelated to the DataFrame (not involving dtf), do NOT call code_exec.
+  - If the answer requires external information, use search_web.
+  - If the answer can be given directly (concepts, definitions, general knowledge), use final_answer.
 
 This dataset contains credit scores for each customer of the bank. Here's the first rows:
 {str_data}
 '''
+
 
 
 # Bucle del chat interativo
