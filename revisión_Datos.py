@@ -46,7 +46,7 @@ data = data.rename(columns={"MW": "demanda_mw", "MW_P": "demanda_pronosticada"})
 data = data.set_index("fechaHora")
 
 # 6. Seleccionar un día específico para graficar
-fecha = "2024-09-26"
+fecha = "2024-09-06"
 data_dia = data.loc[fecha]
 
 # Graficar
