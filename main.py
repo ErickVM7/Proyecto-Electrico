@@ -1,33 +1,39 @@
 # =============================
 # Librerías
 # =============================
-import pandas as pd
-import numpy as np
+
+#Manejo de datos y gráficos
+import pandas as pd 
 import matplotlib.pyplot as plt
 
-import random
-import string
+#Validación/limpiar, parsear JSON y salida
+import ast
 import io
 import contextlib
 import re
-import subprocess
 import json
 
-# =============================
-# Conexión con Ollama
-# =============================
+# Predicciones de series de tiempo
+from statsmodels.tsa.arima.model import ARIMA
+from prophet import Prophet
+
+
+# Conexión con Ollama y el modeolo
+
 import ollama
+import subprocess
 
-llm = "llama3.2:3b"  # Modelo (se puede cambiar por llama, mistral, qwen, etc.) mistral:7b
-subprocess.run(["ollama", "pull", llm], check=False)
+llm = "qwen2.5:7b"  # Modelo (se puede cambiar por llama, mistral, qwen, etc.) mistral:7b llama3.2:3b  qwen2.5:14b qwen3:8b
+subprocess.run(["ollama", "pull", llm], check=False) #se hace el pull del modelo si no está descargado
+
 
 # =============================
-# Herramienta para leer CSV
+# Herramienta para leer CSV y guardar en dtf
 # =============================
 def load_csv(path: str) -> str:
-    global dtf
+    global dtf # Variable global para almacenar el DataFrame
     try:
-        dtf = pd.read_csv(path)
+        dtf = pd.read_csv(path) 
 
         # Detectar automáticamente la columna de fechas
         datetime_col = None
@@ -43,11 +49,12 @@ def load_csv(path: str) -> str:
         dtf[datetime_col] = pd.to_datetime(dtf[datetime_col])
         dtf.set_index(datetime_col, inplace=True)
 
-        print(dtf.head())
+        print(dtf.head()) # Mostrar las primeras filas del DataFrame cargado
         return f"Archivo {path} cargado correctamente con {dtf.shape[0]} filas. Índice temporal: {datetime_col}. Columnas: {list(dtf.columns)}"
     except Exception as e:
         return f"Error al cargar el archivo: {e}"
 
+# Definir la herramienta load_csv para que Ollama pueda usarla y que parámetros acepta
 tool_load_csv = {
   'type': 'function',
   'function': {
@@ -65,6 +72,7 @@ tool_load_csv = {
 
 # =============================
 # Herramienta para respuesta final
+# Sirve para devolver una respuesta en lenguaje natural al usuario
 # =============================
 def final_answer(text:str) -> str:
     return text
@@ -86,28 +94,73 @@ tool_final_answer = {
 
 # =============================
 # Herramienta para ejecutar código
+# Esta tool esta para arreglar errores de sintaxis comunes del modelo
 # =============================
+
+
+def is_valid_python(code: str) -> bool:
+    """Verifica si el código es sintácticamente válido en Python."""
+    try:
+        ast.parse(code)
+        return True
+    except SyntaxError:
+        return False
+
+
+
+
+
 def sanitize_code(code: str) -> str:
-    # Forzar uso de dtf en lugar de df
     code = code.replace("df[", "dtf[")
 
-    # Reemplazar funciones sueltas por métodos de pandas
-    code = re.sub(r"mean\((dtf\[.+?\])\)", r"\1.mean()", code)
-    code = re.sub(r"max\((dtf\[.+?\])\)", r"\1.max()", code)
-    code = re.sub(r"min\((dtf\[.+?\])\)", r"\1.min()", code)
-    code = re.sub(r"sum\((dtf\[.+?\])\)", r"\1.sum()", code)
+    # Si detecta un acceso incompleto 
+    if re.match(r'^\s*print\s*\(\s*dtf\[\s*$', code):
+     return "Código incompleto, debes especificar la columna y la operación"
+
+
+    # autocierre de paréntesis, corchetes y comillas
+    if code.count("(") > code.count(")"):
+        code += ")" * (code.count("(") - code.count(")"))
+    if code.count("[") > code.count("]"):
+        code += "]" * (code.count("[") - code.count("]"))
+    if code.count('"') % 2 != 0:
+        code += '"'
+    if code.count("'") % 2 != 0:
+        code += "'"
 
     return code
 
+
+
 def code_exec(code: str) -> str:
-    code = sanitize_code(code)
+    
     output = io.StringIO()
+    retries = 0
+    code = code.strip()
+
+    while retries < 10:
+        code = sanitize_code(code)
+
+        # Forzar que sea un print(...)
+        if not code.startswith("print(") or not code.endswith(")"):
+            return "Error: el código debe ser una sola instrucción print() cerrada."
+
+        if is_valid_python(code):
+            break
+        retries += 1
+
+    if not is_valid_python(code):
+        return "Error: el código está incompleto. Debes usar algo como print(dtf[].max())."
+
+
     with contextlib.redirect_stdout(output):
         try:
             exec(code, globals())
         except Exception as e:
             print(f"Error: {e}")
+
     return output.getvalue()
+
 
 tool_code_exec = {
   'type':'function',
@@ -155,7 +208,7 @@ def plot_data(columns=None, start_date=None, end_date=None, title="Gráfico de d
     Genera un gráfico con matplotlib a partir del DataFrame dtf.
     columns: lista de columnas a graficar. Si es None, grafica todas.
     start_date, end_date: rango de fechas opcional.
-    title: título del gráfico.
+    title: título del gráfico que se puede ajustar según el contexto.
     """
     try:
         df = dtf.copy()
@@ -223,77 +276,6 @@ tool_plot_data = {
 }
 
 
-
-# =============================
-# Diccionario de herramientas
-# =============================
-dic_tools = {
-    "load_csv": load_csv,
-    "final_answer": final_answer,
-    "code_exec": code_exec,
-    "plot_data": plot_data
-}
-
-# =============================
-# Ejecutor de herramientas
-# =============================
-
-
-def use_tool(agent_res: dict, dic_tools: dict) -> dict:
-    msg = agent_res["message"]
-    res, t_name, t_inputs = "", "", ""
-
-    if hasattr(msg, "tool_calls") and msg.tool_calls:
-        for tool in msg.tool_calls:
-            t_name = tool["function"]["name"]
-            raw_args = tool["function"]["arguments"]
-
-            # 👇 Parsear inputs de manera segura
-            try:
-                t_inputs = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-            except Exception:
-                t_inputs = raw_args
-
-            # 👇 Normalizar argumentos de load_csv
-            if t_name == "load_csv":
-                t_inputs = normalize_csv_args(t_inputs)
-                if t_inputs is None:
-                    res = "Error: argumentos inválidos para load_csv."
-                    print(res)
-                    return {"res": res, "tool_used": t_name, "inputs_used": t_inputs}
-
-            # 👇 Normalizar argumentos de plot_data
-            if t_name == "plot_data":
-                t_inputs = normalize_plot_args(t_inputs)
-
-            # 👇 Mapear casos especiales de final_answer
-            if t_name == "final_answer" and isinstance(t_inputs, dict) and "final_answer" in t_inputs:
-                t_inputs = {"text": t_inputs["final_answer"]}
-
-            # 🔧 Ejecutar herramienta
-            if f := dic_tools.get(t_name):
-                print('🔧 >', f"\x1b[1;31m{t_name} -> Inputs: {t_inputs}\x1b[0m")
-                try:
-                    if isinstance(t_inputs, dict):
-                        t_output = f(**t_inputs)
-                    else:
-                        t_output = f(t_inputs)
-                except Exception as e:
-                    # Feedback al modelo en caso de error
-                    t_output = f"Error ejecutando {t_name}: {e}. Columnas disponibles: {list(dtf.columns) if 'dtf' in globals() else 'No hay dataset cargado'}"
-                print(t_output)
-                res = t_output
-            else:
-                print('🤬 >', f"\x1b[1;31m{t_name} -> NotFound\x1b[0m")
-
-    # 👇 Si el mensaje trae contenido normal (texto), devolverlo como respuesta
-    if msg.get("content", "") != "":
-        res = msg["content"]
-        t_name, t_inputs = "", ""
-
-    return {"res": res, "tool_used": t_name, "inputs_used": t_inputs}
-
-
 def normalize_csv_args(t_inputs):
     """
     Normaliza los argumentos que llegan a load_csv para que siempre terminen
@@ -315,7 +297,7 @@ def normalize_csv_args(t_inputs):
             return {"path": candidate}
         return None
 
-    # Caso anidado: {"path": {"value": "archivo.csv"}} o similar
+    # Caso {"path": {"value": "archivo.csv"}} o similar
     if isinstance(t_inputs, dict) and "path" in t_inputs and isinstance(t_inputs["path"], dict):
         inner = t_inputs["path"]
         if "value" in inner:
@@ -325,7 +307,7 @@ def normalize_csv_args(t_inputs):
         if "path" in inner:
             return {"path": inner["path"]}
 
-    # Caso string plano: "archivo.csv"
+    # Caso string : "archivo.csv"
     if isinstance(t_inputs, str):
         candidate = t_inputs.strip().strip("{}()")
         if candidate != "":
@@ -337,123 +319,309 @@ def normalize_csv_args(t_inputs):
 
 
 
+# =============================
+# Herramienta para predicciones de series de tiempo
+# =============================
+
+
+def predict_data(model="prophet", column=None, horizon=7):
+    """
+    Genera predicciones de series de tiempo usando Prophet o ARIMA y grafica los valores futuros.
+    - model: "prophet" o "arima"
+    - column: nombre de la columna a predecir 
+    - horizon: horizonte de predicción en días
+    """
+    try:
+        df = dtf.copy()
+        if column is None or column not in df.columns:
+            return f"Error: debes especificar una columna válida. Columnas disponibles: {list(df.columns)}"
+
+        df = df[[column]].dropna().reset_index()
+        df.columns = ["ds", "y"]  # Prophet requiere estos nombres
+
+        if model.lower() == "prophet":
+            m = Prophet(daily_seasonality=True)
+            m.fit(df)
+            future = m.make_future_dataframe(periods=horizon)
+            forecast = m.predict(future)
+
+            # Graficar
+            fig, ax = plt.subplots(figsize=(10, 5))
+            m.plot(forecast, ax=ax)
+            plt.title(f"Predicción con Prophet para {column} ({horizon} días)")
+            plt.xlabel("Fecha")
+            plt.ylabel(column)
+            plt.grid(True)
+            plt.show()
+
+            # Devolver últimos valores predichos
+            tail = forecast[["ds", "yhat"]].tail(horizon)
+            return f"Predicción con Prophet completada. Últimos valores:\n{tail.to_string(index=False)}"
+
+        elif model.lower() == "arima":
+            df.set_index("ds", inplace=True)
+            model_fit = ARIMA(df["y"], order=(2, 1, 2)).fit()
+            forecast = model_fit.forecast(steps=horizon)
+
+            # Graficar
+            plt.figure(figsize=(10, 5))
+            plt.plot(df.index, df["y"], label="Datos reales")
+            plt.plot(pd.date_range(df.index[-1], periods=horizon+1, freq="D")[1:], forecast,  label="Predicción", linestyle="--")
+            plt.title(f"Predicción con ARIMA para {column} ({horizon} días)")
+            plt.xlabel("Fecha")
+            plt.ylabel(column)
+            plt.legend()
+            plt.grid(True)
+            plt.show(block=True)
+            plt.show()
+
+            # Devolver últimos valores predichos
+            forecast_df = pd.DataFrame({
+                "ds": pd.date_range(df.index[-1], periods=horizon+1, freq="D")[1:],
+                "yhat": forecast
+            })
+            return f"Predicción con ARIMA completada. Últimos valores:\n{forecast_df.to_string(index=False)}"
+
+        else:
+            return "Error: modelo no reconocido. Usa 'prophet' o 'arima'."
+
+    except Exception as e:
+        return f"Error durante la predicción: {e}"
+
+
+tool_predict_data = {
+  'type': 'function',
+  'function': {
+    'name': 'predict_data',
+    'description': 'Genera predicciones de series de tiempo con Prophet o ARIMA. Siempre grafica los valores futuros junto con los datos históricos y devuelve un resumen de los últimos valores predichos.',
+    'parameters': {
+      'type': 'object',
+      'properties': {
+        'model': {
+          'type': 'string',
+          'description': 'Modelo de predicción a usar: "prophet" o "arima".'
+        },
+        'column': {
+          'type': 'string',
+          'description': 'Nombre de la columna a predecir'
+        },
+        'horizon': {
+          'type': 'integer',
+          'description': 'Horizonte de predicción en días.'
+        }
+      },
+      'required': ['model', 'column']
+    }
+  }
+}
+
+
+
+
+
+# =============================
+# Diccionario de herramientas
+# El LLM solo ve las herramientas en este diccionario
+# =============================
+dic_tools = {
+    "load_csv": load_csv,
+    "final_answer": final_answer,
+    "code_exec": code_exec,
+    "plot_data": plot_data,
+    "predict_data": predict_data 
+    
+}
+
+# =============================
+# Ejecutor de herramientas
+# =============================
+
+# Lee las tool calls que el LLM decidió invocar.
+# Mapea y ejecuta la función Python correspondiente.
+
+def use_tool(agent_res: dict, dic_tools: dict) -> dict:
+    msg = agent_res["message"]
+    res, t_name, t_inputs = "", "", ""
+
+    if hasattr(msg, "tool_calls") and msg.tool_calls:
+        for tool in msg.tool_calls:
+            t_name = tool["function"]["name"]
+            raw_args = tool["function"]["arguments"]
+
+            # Parsear argumentos en formato JSON o dict
+            try:
+                t_inputs = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+            except Exception:
+                t_inputs = raw_args
+
+            # 👇 Normalizar argumentos según la herramienta
+            if t_name == "load_csv":
+                t_inputs = normalize_csv_args(t_inputs)
+
+            elif t_name == "plot_data":
+                t_inputs = normalize_plot_args(t_inputs)
+
+            elif t_name == "code_exec":
+                if isinstance(t_inputs, dict):
+                    code = t_inputs.get("code", "")
+                    t_inputs = {"code": code}
+
+            elif t_name == "predict_data":
+                if isinstance(t_inputs, dict):
+                    # Valores por defecto
+                    t_inputs.setdefault("model", "prophet")
+                    t_inputs.setdefault("horizon", 7)
+                    if "column" not in t_inputs or t_inputs["column"] not in dtf.columns:
+                        t_inputs["column"] = list(dtf.columns)[0]
+
+            elif t_name == "final_answer" and isinstance(t_inputs, dict) and "final_answer" in t_inputs:
+                t_inputs = {"text": t_inputs["final_answer"]}
+
+            # 🔧 Ejecutar la herramienta correspondiente
+            if f := dic_tools.get(t_name):
+                print(f"🔧 > {t_name} -> Inputs: {t_inputs}")
+                try:
+                    if isinstance(t_inputs, dict):
+                        t_output = f(**t_inputs)
+                    else:
+                        t_output = f(t_inputs)
+                except Exception as e:
+                    cols = list(dtf.columns) if 'dtf' in globals() else 'No hay dataset cargado'
+                    t_output = f"Error ejecutando {t_name}: {e}. Columnas disponibles: {cols}"
+
+                # Mostrar resultado
+                print(f"📊 Resultado: {t_output}")
+                res = t_output
+            else:
+                print(f"🤬 > {t_name} -> NotFound")
+
+    # Si el mensaje trae texto normal (sin herramientas)
+    if msg.get("content", "") != "":
+        res = msg["content"]
+        t_name, t_inputs = "", ""
+
+    return {"res": res, "tool_used": t_name, "inputs_used": t_inputs}
+
+
+
+
+
+
+
+
 
 
 # =============================
 # Bucle principal del agente
 # =============================
+# Hace el loop de llamadas con Ollama
+# Pasa las tools (metadata) para que el LLM pueda decidir cuál usar.
+#  Mantiene un historial de uso de herramientas
+
 def run_agent(llm, messages, available_tools):
     tool_used, local_memory = '', ''
-    used_code_exec = False   # 👈 bandera para saber si ya se usó code_exec
+    used_compute = False
 
     while tool_used != 'final_answer':
         try:
             agent_res = ollama.chat(
                 model=llm, 
                 messages=messages, 
-                format="json", 
+                #format="json", 
                 tools=[v for v in available_tools.values()]
             )
 
             dic_res = use_tool(agent_res, dic_tools)
             res, tool_used, inputs_used = dic_res["res"], dic_res["tool_used"], dic_res["inputs_used"]
 
-            # 👀 Marcar cuando se use code_exec
-            if tool_used == "code_exec":
-                used_code_exec = True  
+          
+            if tool_used in ("code_exec", "plot_data"):
+                used_compute = True
 
-            # 🚨 Evitar final_answer sin code_exec antes
-            if tool_used == "final_answer" and not used_code_exec:
-                print("⚠️ > El modelo intentó responder sin calcular. Reintentando con code_exec...")
+            user_query = messages[-1]["content"].lower()
+            needs_compute = any(word in user_query for word in [
+                "promedio", "media", "máximo", "mínimo", "suma", "resta",
+                "gráfico", "grafica", "plot", "visualiza", "filtra",
+                "porcentaje", "calcula", "valor", "estadística", "histograma", "error", 
+            ])
+
+            if tool_used == "final_answer" and needs_compute and not used_compute:
+                print("⚠️ > El modelo intentó responder sin calcular. Reintentando...")
                 messages.append({
                     "role": "user", 
-                    "content": "Debes usar code_exec para calcular antes de dar la respuesta final."
+                    "content": "Debes usar code_exec o plot_data antes de final_answer."
                 })
-                tool_used = ""  # 👈 forzar otra vuelta
+                tool_used = ""
                 continue
 
         except Exception as e:
             print("⚠️ >", e)
             res = f"Intenté usar {tool_used} pero falló. Intentaré otra cosa."
-            messages.append({"role":"assistant", "content":res})
+            messages.append({"role": "assistant", "content": res})
 
-        # 👇 memoria local de uso de herramientas
-        if tool_used not in ['','final_answer']:
+        if tool_used not in ['', 'final_answer']:
+            # Agregar al historial de memoria
             local_memory += f"\nTool used: {tool_used}.\nInput used: {inputs_used}.\nOutput: {res}"
-            messages.append({"role":"assistant", "content":local_memory})
+            messages.append({"role": "assistant", "content": f"Resultado: {res}"})
             available_tools.pop(tool_used, None)
             if len(available_tools) == 1:
-                messages.append({"role":"user", "content":"ahora activa la herramienta final_answer."})
+                messages.append({"role": "user", "content": "ahora activa la herramienta final_answer."})
 
         if tool_used == '':
             break
 
     return res
 
-# =============================
 prompt = '''
-Eres un Analista de Datos especializado en series de tiempo o tabulares.
+Eres un Analista de Datos experto en Python y pandas.
 Tu tarea es responder cualquier consulta del usuario sobre el dataset `dtf`.
 
-📌 Reglas del dataset:
-- El dataset se llama siempre dtf.
-- Las columnas y datos pueden variar según el CSV cargado.
-- Antes de hacer cálculos o gráficos, identifica las columnas disponibles en dtf (usa dtf.columns) y utiliza exactamente esos nombres.
-- Usa métodos de pandas para cálculos, transformaciones y filtrados.
-- Usa comillas dobles para los nombres de columnas (ejemplo: dtf["columna"]).
-- Siempre muestra los resultados con print() (excepto gráficos).
-- No inventes columnas ni datasets.
-- Nunca uses pd.read_csv() dentro de code_exec; el dataset ya está cargado en dtf.
+Reglas generales:
+- El dataset siempre se llama `dtf` (ya cargado en memoria).
+- Usa solo las columnas reales disponibles en dtf.columns.
+- Nunca inventes datos, nombres de columnas ni valores numéricos.
+- Siempre usa comillas dobles para los nombres de columnas: dtf["columna"].
+- Nunca uses pd.read_csv() dentro de code_exec.
 
-📌 Reglas de uso de herramientas:
-- Para cálculos, estadísticas, transformaciones o filtrados:
-  1. Usa code_exec para ejecutar el cálculo en Python.
-  2. Después de code_exec, usa final_answer para explicar el resultado en lenguaje natural.
-- Para gráficos: usa exclusivamente la herramienta plot_data.
-- Nunca uses final_answer directamente para preguntas de cálculo o gráficos; siempre después de code_exec o plot_data.
-- Si no hay datos cargados, indica que debe usarse load_csv.
-- Todo bloque de código debe ser sintácticamente completo y ejecutable en Python.
-- Nunca dejes funciones o paréntesis sin cerrar (ejemplo: plt.title("..."), dtf["columna"]).
+Reglas para cálculos:
+- Usa la herramienta code_exec con una única línea completa y válida: print(...).
+- Ejemplo válido: {"code": "print(dtf[\"MW\"].mean())"}
+- Nunca generes código incompleto ni multilínea.
+- Después de code_exec, usa final_answer para explicar el resultado en lenguaje natural.
 
-📌 Reglas de herramientas (OBLIGATORIAS):
-- load_csv: solo para cargar un archivo. Formato: {"path": "archivo.csv"}.
-  Ejemplo: {"path": "datos_limpios.csv"}.
-  No uses parámetros extra como "code", "value", "file_path".
-- code_exec: exclusivamente para ejecutar código Python. Formato: {"code": "..."}.
-- final_answer: exclusivamente para dar la respuesta final en lenguaje natural. Formato: {"text": "..."}.
-- plot_data: exclusivamente para graficar datos. Formato:
-  {"columns": ["col1","col2"], "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD", "title": "título"}.
-  - "columns" siempre debe ser una lista JSON de strings. Ejemplo: ["MW","MW_P"]. Nunca como string "['MW']".
-  - Si no se indican columnas, se grafican todas.
-  - "start_date" y "end_date" son opcionales (si no se dan, se usa todo el rango disponible).
-  - Para un día específico, usar start_date = end_date = "YYYY-MM-DD".
-  - "title" debe ser siempre un texto descriptivo del gráfico.
+Reglas para gráficos:
+- Usa exclusivamente la herramienta plot_data.
+- "columns" debe ser una lista JSON (ej: ["MW","MW_P"]).
+- Si el usuario pide un día: start_date = end_date = "YYYY-MM-DD".
+- "title" debe describir el gráfico claramente.
+- Nunca uses matplotlib manualmente en code_exec.
 
-📌 Reglas de gráficos (cuando uses plot_data):
-- Usa siempre nombres reales de las columnas en dtf (consulta dtf.columns).
-- Si el usuario pide varias columnas: inclúyelas en "columns" como lista.
-- Si no especifica columnas: grafica todas.
-- El parámetro title debe describir el gráfico claramente (ejemplo: "Consumo de energía en 2024-09-05").
-- Nunca generes manualmente código matplotlib en code_exec; los gráficos se hacen solo con plot_data.
-- Si el usuario pide un único día (ej: "solo el día 2024-09-06"), debes poner start_date = end_date = "2024-09-06".
-- Nunca uses rangos amplios (ej: start_date="2024-09-01", end_date="2024-09-06") si el usuario pidió un único día.
+Reglas para predicciones:
+- Usa la herramienta predict_data para generar predicciones automáticas.
+- Siempre grafica los valores futuros junto con los históricos.
+- Parámetros: {"model": "prophet" o "arima", "column": "MW", "horizon": 7}.
+- Nunca inventes valores de predicción; deben provenir de la ejecución real.
+- Después de predecir, usa final_answer para explicar el resultado.
+
+Reglas para final_answer:
+- Usa final_answer solo para texto descriptivo o interpretaciones.
+- No inventes valores calculados; todos deben provenir de code_exec, plot_data o predict_data.
+
+Flujo de decisión:
+- Si requiere cálculo, estadística, gráfico o predicción → usa primero code_exec, plot_data o predict_data.
+- Si es descriptivo o conceptual → usa final_answer.
+- Si no hay datos disponibles → final_answer explicando la causa.
 
 
-📌 Ejemplos de uso de plot_data:
-- {"columns": ["MW"], "start_date": "2024-09-05", "end_date": "2024-09-05", "title": "MW en 2024-09-05"}
-- {"columns": ["MW","MW_P"], "start_date": "2024-09-01", "end_date": "2024-09-30", "title": "MW vs MW_P en septiembre 2024"}
-- {"columns": [], "title": "Todas las columnas disponibles"}
-
-
-📌 Reglas específicas para code_exec:
-- El parámetro "code" siempre debe ser un bloque de Python **completo y válido**.
-- Siempre debe contener una instrucción print(...) correctamente cerrada.
-- Nunca generes código incompleto, paréntesis abiertos o comillas sin cerrar.
-- Nunca uses múltiples líneas en code_exec, solo una única instrucción.
-- Ejemplo válido: {"code": "print(dtf[\"MW\"].max())"}
-- Ejemplo inválido: {"code": "print(dtf["}  ❌
-
+Ejemplos: 
+- Usuario: "¿Qué columnas tiene el archivo?" → {"name":"final_answer","arguments":{"text":"Las columnas son ..."}} 
+- Usuario: "¿Cuál es el promedio de MW?" → {"name":"code_exec","arguments":{"code":"print(dtf[\"MW\"].mean())"}} 
+- Usuario: "Haz un gráfico del día 2024-09-06" → {"name":"plot_data","arguments":{"columns":["MW"],"start_date":"2024-09-06","end_date":"2024-09-06","title":"MW en 2024-09-06"}}
+- Usuario: "¿Qué tan correlacionadas están MW y MW_P?" → {"name":"code_exec","arguments":{"code":"print(dtf[\"MW\"].corr(dtf[\"MW_P\"]))"}} 
+- Usuario: "Haz una predicción de los próximos 7 días con Prophet para MW" → {"name":"predict_data","arguments":{"model":"prophet","column":"MW","horizon":7}}
 '''
+
+
 
 
 messages = [{"role":"system", "content":prompt}]
@@ -465,15 +633,14 @@ while True:
     q = input("🙂 > ")
     if q.lower() == "quit":
         break
-    messages.append({"role":"user", "content":q})
-
+    messages.append({"role": "user", "content": q})
     available_tools = {
         "load_csv": tool_load_csv,
         "final_answer": tool_final_answer,
         "code_exec": tool_code_exec,
-        "plot_data": tool_plot_data
+        "plot_data": tool_plot_data,
+        "predict_data": tool_predict_data
     }
     res = run_agent(llm, messages, available_tools)
-
-    print("👽 >", f"\x1b[1;30m{res}\x1b[0m")
-    messages.append({"role":"assistant", "content":res})
+    print("👽 >", res)
+    messages.append({"role": "assistant", "content": res})

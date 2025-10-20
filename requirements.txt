@@ -11,5 +11,6 @@ duckduckgo-search
 ddgs
 DDGS
 requests
-io
+#io
 datetime
+pandasai
