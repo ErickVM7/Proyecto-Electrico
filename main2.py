@@ -7,6 +7,7 @@ import ast, io, contextlib, re, json, subprocess
 from statsmodels.tsa.arima.model import ARIMA
 from prophet import Prophet
 import ollama
+from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 # =============================
 # Configuración del modelo
@@ -101,76 +102,120 @@ def plot_data(columns=None, start_date=None, end_date=None, title="Gráfico de d
     except Exception as e:
         return f"Error al graficar: {e}"
 
-def predict_data(model="prophet", column=None, horizon=1, end_date=None):
+
+
+def predict_data(model="prophet", column=None, horizon=None, end_date=None):
+    """
+    Genera predicciones de series de tiempo usando Prophet o SARIMA.
+    - model: "prophet" o "arima"
+    - column: nombre de la columna a predecir (ej. "MW")
+    - horizon: número de días o texto (ej. "2 días", "10 days")
+    - end_date: fecha final (YYYY-MM-DD)
+    El modelo ahora predice exactamente lo que el usuario pida, sin límite artificial.
+    """
     try:
         df = dtf.copy()
-        if column not in df.columns:
-            return f"Error: columna no válida. Columnas disponibles: {list(df.columns)}"
+        if column is None or column not in df.columns:
+            return f"Error: debes especificar una columna válida. Columnas disponibles: {list(df.columns)}"
 
+        # Preparar datos base
         df = df[[column]].dropna().reset_index()
         df.columns = ["ds", "y"]
-        freq = pd.infer_freq(df["ds"].head(10)) or "15min"
-        freq_minutes = int(re.findall(r"\d+", freq)[0]) if "min" in freq else 1440
-
+        freq = "15min"
         last_date = df["ds"].max()
 
-        if end_date:
-            target_date = pd.to_datetime(end_date)
-            delta_minutes = (target_date - last_date).total_seconds() / 60
-            if delta_minutes <= 0:
-                return f"La fecha {end_date} ya está dentro del rango de datos."
-            steps = int(delta_minutes / freq_minutes)
-        else:
-            steps = horizon * int(24 * 60 / freq_minutes)
+        # -------------------------------
+        # 🔹 Determinar horizonte de predicción
+        # -------------------------------
+        steps = 96  # valor por defecto (1 día)
+        if horizon:
+            if isinstance(horizon, str):
+                # Captura expresiones como “2 días”, “5 day”, “10 días”, etc.
+                match = re.findall(r"\d+", horizon)
+                days = int(match[0]) if match else 1
+                steps = days * 96
+            elif isinstance(horizon, int):
+                steps = horizon * 96
+        elif end_date:
+            try:
+                target_date = pd.to_datetime(end_date)
+                delta = target_date - last_date
+                if delta.total_seconds() <= 0:
+                    return f"La fecha {end_date} ya está incluida en los datos."
+                steps = int(delta.total_seconds() / (15 * 60))
+            except Exception as e:
+                return f"Error interpretando end_date: {e}"
 
+        if steps <= 0:
+            return "Error: el horizonte calculado no puede ser cero o negativo."
+
+        # -------------------------------
+        # 🔹 PROFET
+        # -------------------------------
         if model.lower() == "prophet":
             m = Prophet(daily_seasonality=True)
             m.fit(df)
+
             future = m.make_future_dataframe(periods=steps, freq=freq)
             forecast = m.predict(future)
             forecast_pred = forecast[forecast["ds"] > last_date][["ds", "yhat"]]
-            if end_date:
-                forecast_pred = forecast_pred[forecast_pred["ds"] <= target_date]
 
+            # Graficar solo predicciones
             plt.figure(figsize=(10, 5))
             plt.plot(forecast_pred["ds"], forecast_pred["yhat"], "o-", color="darkorange", label="Predicción (Prophet)")
-            plt.title(f"Predicción Prophet para {column}" + (f" hasta {end_date}" if end_date else f" ({horizon} día{'s' if horizon>1 else ''})"))
+            plt.title(f"Predicción Prophet para {column} ({steps//96} día{'s' if steps>96 else ''}, {steps} pasos)")
             plt.xlabel("Fecha")
             plt.ylabel(column)
             plt.grid(True)
             plt.legend()
             plt.show()
 
+            pd.set_option("display.max_rows", None)
             print("\n📈 Predicciones futuras:\n")
             print(forecast_pred.to_string(index=False))
-            return f"Predicción Prophet completada ({len(forecast_pred)} puntos mostrados)."
+            return f"Predicción Prophet completada ({len(forecast_pred)} puntos, hasta {steps//96} día{'s' if steps>96 else ''})."
 
+        # -------------------------------
+        # 🔹 SARIMA
+        # -------------------------------
         elif model.lower() == "arima":
-            df.set_index("ds", inplace=True)
-            model_fit = ARIMA(df["y"], order=(2, 1, 2)).fit()
-            future_dates = pd.date_range(last_date, periods=steps+1, freq=freq)[1:]
+            from statsmodels.tsa.statespace.sarimax import SARIMAX
+
+            # Limitar datos si la serie es muy grande (solo para evitar desbordes de memoria)
+            df_use = df.tail(96 * 30) if len(df) > 10000 else df.copy()  # últimos 30 días
+            df_use.set_index("ds", inplace=True)
+
+            # Entrenar modelo SARIMA
+            model_fit = SARIMAX(df_use["y"], order=(2, 1, 2), seasonal_order=(1, 0, 1, 96)).fit(disp=False)
+
+            # Generar fechas futuras y predicciones
+            future_dates = pd.date_range(last_date, periods=steps + 1, freq=freq)[1:]
             forecast = model_fit.forecast(steps=steps)
             forecast_df = pd.DataFrame({"ds": future_dates, "yhat": forecast})
-            if end_date:
-                forecast_df = forecast_df[forecast_df["ds"] <= target_date]
 
+            # Graficar
             plt.figure(figsize=(10, 5))
-            plt.plot(forecast_df["ds"], forecast_df["yhat"], "o-", color="steelblue", label="Predicción (ARIMA)")
-            plt.title(f"Predicción ARIMA para {column}" + (f" hasta {end_date}" if end_date else f" ({horizon} día{'s' if horizon>1 else ''})"))
+            plt.plot(forecast_df["ds"], forecast_df["yhat"], "o-", color="mediumseagreen", label="Predicción (SARIMA)")
+            plt.title(f"Predicción SARIMA para {column} ({steps//96} día{'s' if steps>96 else ''}, {steps} pasos)")
             plt.xlabel("Fecha")
             plt.ylabel(column)
             plt.grid(True)
             plt.legend()
             plt.show()
 
+            pd.set_option("display.max_rows", None)
             print("\n📈 Predicciones futuras:\n")
             print(forecast_df.to_string(index=False))
-            return f"Predicción ARIMA completada ({len(forecast_df)} puntos mostrados)."
+            return f"Predicción SARIMA completada ({len(forecast_df)} puntos, hasta {steps//96} día{'s' if steps>96 else ''})."
 
         else:
             return "Error: modelo no reconocido. Usa 'prophet' o 'arima'."
+
     except Exception as e:
         return f"Error durante la predicción: {e}"
+
+
+
 
 # =============================
 # Diccionario de herramientas
@@ -185,25 +230,132 @@ dic_tools = {
 # =============================
 # Ejecutor de herramientas
 # =============================
-def use_tool(agent_res, dic_tools):
+def normalize_predict_args(t_inputs):
+    """
+    Corrige y normaliza argumentos comunes en predict_data.
+    - Si 'horizon' parece una fecha, lo convierte a 'end_date'.
+    - Si no se especifica horizon, usa 96 pasos (1 día de 15 min).
+    - Convierte 'horizon': '1 day' → 96.
+    - Limita horizon a 288 (máx. 3 días).
+    """
+    if not isinstance(t_inputs, dict):
+        return t_inputs
+
+    # Ignora campos inventados por el modelo
+    for k in ["forecast_type", "prediction_type", "days_ahead"]:
+        t_inputs.pop(k, None)
+
+    # horizon recibido como fecha → end_date
+    if "horizon" in t_inputs and isinstance(t_inputs["horizon"], str):
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", t_inputs["horizon"]):
+            t_inputs["end_date"] = t_inputs.pop("horizon")
+        else:
+            # "1 day", "2 días" → convertir a pasos de 96 por día
+            num = re.findall(r"\d+", t_inputs["horizon"])
+            t_inputs["horizon"] = int(num[0]) * 96 if num else 96
+
+    # date → end_date
+    if "date" in t_inputs and "end_date" not in t_inputs:
+        t_inputs["end_date"] = t_inputs.pop("date")
+
+    # Si no se especifica horizon, usar 96 pasos (1 día)
+    if "horizon" not in t_inputs:
+        t_inputs["horizon"] = 96
+
+    # Si horizon es entero pero muy grande, limitar
+    if isinstance(t_inputs.get("horizon"), int) and t_inputs["horizon"] > 288:
+        print(f"⚠️  Horizon demasiado grande ({t_inputs['horizon']} pasos). Se limitará a 288.")
+        t_inputs["horizon"] = 288
+
+    # Normaliza modelo
+    if "model" in t_inputs and isinstance(t_inputs["model"], str):
+        t_inputs["model"] = t_inputs["model"].lower()
+
+    return t_inputs
+
+
+
+
+def use_tool(agent_res: dict, dic_tools: dict) -> dict:
+    """
+    Ejecuta las herramientas solicitadas por el modelo.
+    - Soporta tanto tool_calls formales como JSON plano en content.
+    - Incluye normalización automática de argumentos.
+    """
     msg = agent_res["message"]
-    res, t_name = "", ""
+    res, t_name, t_inputs = "", "", ""
+
+    # ✅ Caso 1: tool_calls formales (cuando Ollama estructura la llamada)
     if hasattr(msg, "tool_calls") and msg.tool_calls:
         for tool in msg.tool_calls:
             t_name = tool["function"]["name"]
             raw_args = tool["function"]["arguments"]
+
+            # Parsear argumentos
             try:
                 t_inputs = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-            except:
+            except Exception:
                 t_inputs = raw_args
+
+            # 🔧 Normalización según la herramienta
+            if t_name == "load_csv":
+                t_inputs = normalize_csv_args(t_inputs)
+            elif t_name == "plot_data":
+                t_inputs = normalize_plot_args(t_inputs)
+            elif t_name == "code_exec":
+                if isinstance(t_inputs, dict):
+                    code = t_inputs.get("code", "")
+                    t_inputs = {"code": code}
+            elif t_name == "predict_data":
+                t_inputs = normalize_predict_args(t_inputs)
+                if isinstance(t_inputs, dict):
+                    t_inputs.setdefault("model", "prophet")
+                    t_inputs.setdefault("horizon", 7)
+                    if "column" not in t_inputs or t_inputs["column"] not in dtf.columns:
+                        t_inputs["column"] = list(dtf.columns)[0]
+            elif t_name == "final_answer" and isinstance(t_inputs, dict) and "final_answer" in t_inputs:
+                t_inputs = {"text": t_inputs["final_answer"]}
+
+            # Ejecutar herramienta
             if f := dic_tools.get(t_name):
+                print(f"🔧 > {t_name} -> Inputs: {t_inputs}")
                 try:
-                    res = f(**t_inputs) if isinstance(t_inputs, dict) else f(t_inputs)
+                    t_output = f(**t_inputs) if isinstance(t_inputs, dict) else f(t_inputs)
                 except Exception as e:
-                    res = f"Error ejecutando {t_name}: {e}"
+                    cols = list(dtf.columns) if 'dtf' in globals() else 'No hay dataset cargado'
+                    t_output = f"Error ejecutando {t_name}: {e}. Columnas disponibles: {cols}"
+                print(f"📊 Resultado:\n{t_output}\n")
+                res = t_output
+            else:
+                print(f"🤬 > {t_name} -> NotFound")
+
+    # ✅ Caso 2: JSON plano en msg.content (ej: {"name": ..., "arguments": {...}})
+    elif msg.get("content", "") and msg["content"].strip().startswith("{"):
+        try:
+            tool_call = json.loads(msg["content"])
+            t_name = tool_call.get("name", "")
+            t_inputs = tool_call.get("arguments", {})
+
+            # Normalizar predict_data si aplica
+            if t_name == "predict_data":
+                t_inputs = normalize_predict_args(t_inputs)
+
+            if f := dic_tools.get(t_name):
+                print(f"🔧 > {t_name} -> Inputs: {t_inputs}")
+                res = f(**t_inputs) if isinstance(t_inputs, dict) else f(t_inputs)
+                print(f"📊 Resultado:\n{res}\n")
+            else:
+                res = f"Herramienta {t_name} no encontrada."
+        except Exception as e:
+            res = f"⚠️ Error al interpretar JSON: {e}\nContenido: {msg.get('content')}"
+
+    # ✅ Caso 3: mensaje normal (texto plano sin tool)
     elif msg.get("content", ""):
         res = msg["content"]
-    return {"res": res, "tool_used": t_name}
+        print(f"💬 {res}")
+
+    return {"res": res, "tool_used": t_name, "inputs_used": t_inputs}
+
 
 # =============================
 # Bucle principal
