@@ -8,6 +8,7 @@ from statsmodels.tsa.arima.model import ARIMA
 from prophet import Prophet
 import ollama
 from statsmodels.tsa.statespace.sarimax import SARIMAX
+import os
 
 # =============================
 # Configuración del modelo
@@ -104,115 +105,131 @@ def plot_data(columns=None, start_date=None, end_date=None, title="Gráfico de d
 
 
 
-def predict_data(model="prophet", column=None, horizon=None, end_date=None):
+import os
+
+def predict_data(model="prophet", column=None, horizon=None, end_date=None, save_dir="predicciones"):
     """
-    Genera predicciones de series de tiempo usando Prophet o SARIMA.
-    - model: "prophet" o "arima"
-    - column: nombre de la columna a predecir (ej. "MW")
-    - horizon: número de días o texto (ej. "2 días", "10 days")
-    - end_date: fecha final (YYYY-MM-DD)
-    El modelo ahora predice exactamente lo que el usuario pida, sin límite artificial.
+    Predice valores de 'column' usando Prophet o SARIMA y guarda automáticamente un CSV con:
+    columnas = ['fecha', 'MW_pred'].
+    
+    Parámetros:
+      - model: 'prophet' o 'arima'
+      - column: nombre de la columna (ej. 'MW')
+      - horizon: días de predicción (int o texto como '2 días'). Si es None y no hay end_date -> 1 día (96 pasos)
+      - end_date: fecha final 'YYYY-MM-DD' para predicción hasta ese día
+      - save_dir: carpeta donde se guardará el CSV (por defecto 'predicciones')
     """
     try:
         df = dtf.copy()
         if column is None or column not in df.columns:
             return f"Error: debes especificar una columna válida. Columnas disponibles: {list(df.columns)}"
 
-        # Preparar datos base
+        # Datos base
         df = df[[column]].dropna().reset_index()
         df.columns = ["ds", "y"]
         freq = "15min"
         last_date = df["ds"].max()
 
         # -------------------------------
-        # 🔹 Determinar horizonte de predicción
+        # Determinar horizonte de predicción (pasos)
         # -------------------------------
-        steps = 96  # valor por defecto (1 día)
+        steps = 96  # default 1 día
         if horizon:
             if isinstance(horizon, str):
-                # Captura expresiones como “2 días”, “5 day”, “10 días”, etc.
-                match = re.findall(r"\d+", horizon)
-                days = int(match[0]) if match else 1
-                steps = days * 96
+                nums = re.findall(r"\d+", horizon)
+                days = int(nums[0]) if nums else 1
+                steps = max(1, days * 96)
             elif isinstance(horizon, int):
-                steps = horizon * 96
-        elif end_date:
+                # Interpretamos como días
+                steps = max(1, horizon * 96)
+        if end_date and (not horizon or isinstance(horizon, str) and re.match(r"^\d{4}-\d{2}-\d{2}$", horizon)):
             try:
                 target_date = pd.to_datetime(end_date)
                 delta = target_date - last_date
                 if delta.total_seconds() <= 0:
                     return f"La fecha {end_date} ya está incluida en los datos."
-                steps = int(delta.total_seconds() / (15 * 60))
+                steps = max(1, int(delta.total_seconds() / (15 * 60)))
             except Exception as e:
                 return f"Error interpretando end_date: {e}"
 
-        if steps <= 0:
-            return "Error: el horizonte calculado no puede ser cero o negativo."
+        # -------------------------------
+        # Modelos
+        # -------------------------------
+        model = model.lower()
 
-        # -------------------------------
-        # 🔹 PROFET
-        # -------------------------------
-        if model.lower() == "prophet":
+        if model == "prophet":
             m = Prophet(daily_seasonality=True)
             m.fit(df)
 
             future = m.make_future_dataframe(periods=steps, freq=freq)
             forecast = m.predict(future)
             forecast_pred = forecast[forecast["ds"] > last_date][["ds", "yhat"]]
+            forecast_pred = forecast_pred.rename(columns={"ds": "fecha", "yhat": "MW_pred"})
 
-            # Graficar solo predicciones
+            # Gráfico solo de predicciones
             plt.figure(figsize=(10, 5))
-            plt.plot(forecast_pred["ds"], forecast_pred["yhat"], "o-", color="darkorange", label="Predicción (Prophet)")
-            plt.title(f"Predicción Prophet para {column} ({steps//96} día{'s' if steps>96 else ''}, {steps} pasos)")
+            plt.plot(forecast_pred["fecha"], forecast_pred["MW_pred"], "o-", label="Predicción (Prophet)")
+            plt.title(f"Predicción Prophet para {column} ({steps} pasos, {steps//96} día(s))")
             plt.xlabel("Fecha")
             plt.ylabel(column)
             plt.grid(True)
             plt.legend()
             plt.show()
 
-            pd.set_option("display.max_rows", None)
-            print("\n📈 Predicciones futuras:\n")
-            print(forecast_pred.to_string(index=False))
-            return f"Predicción Prophet completada ({len(forecast_pred)} puntos, hasta {steps//96} día{'s' if steps>96 else ''})."
+            out_df = forecast_pred.copy()
 
-        # -------------------------------
-        # 🔹 SARIMA
-        # -------------------------------
-        elif model.lower() == "arima":
-            from statsmodels.tsa.statespace.sarimax import SARIMAX
-
-            # Limitar datos si la serie es muy grande (solo para evitar desbordes de memoria)
-            df_use = df.tail(96 * 30) if len(df) > 10000 else df.copy()  # últimos 30 días
+        elif model == "arima":
+            # Reducimos a últimos ~30 días si hay demasiados datos (memoria)
+            df_use = df.tail(96 * 30) if len(df) > 10000 else df.copy()
             df_use.set_index("ds", inplace=True)
 
-            # Entrenar modelo SARIMA
-            model_fit = SARIMAX(df_use["y"], order=(2, 1, 2), seasonal_order=(1, 0, 1, 96)).fit(disp=False)
+            sarimax = SARIMAX(df_use["y"], order=(2, 1, 2), seasonal_order=(1, 0, 1, 96)).fit(disp=False)
 
-            # Generar fechas futuras y predicciones
             future_dates = pd.date_range(last_date, periods=steps + 1, freq=freq)[1:]
-            forecast = model_fit.forecast(steps=steps)
-            forecast_df = pd.DataFrame({"ds": future_dates, "yhat": forecast})
+            forecast_vals = sarimax.forecast(steps=steps)
+            forecast_df = pd.DataFrame({"fecha": future_dates, "MW_pred": forecast_vals})
 
-            # Graficar
+            # Gráfico
             plt.figure(figsize=(10, 5))
-            plt.plot(forecast_df["ds"], forecast_df["yhat"], "o-", color="mediumseagreen", label="Predicción (SARIMA)")
-            plt.title(f"Predicción SARIMA para {column} ({steps//96} día{'s' if steps>96 else ''}, {steps} pasos)")
+            plt.plot(forecast_df["fecha"], forecast_df["MW_pred"], "o-", label="Predicción (SARIMA)")
+            plt.title(f"Predicción SARIMA para {column} ({steps} pasos, {steps//96} día(s))")
             plt.xlabel("Fecha")
             plt.ylabel(column)
             plt.grid(True)
             plt.legend()
             plt.show()
 
-            pd.set_option("display.max_rows", None)
-            print("\n📈 Predicciones futuras:\n")
-            print(forecast_df.to_string(index=False))
-            return f"Predicción SARIMA completada ({len(forecast_df)} puntos, hasta {steps//96} día{'s' if steps>96 else ''})."
+            out_df = forecast_df.copy()
 
         else:
             return "Error: modelo no reconocido. Usa 'prophet' o 'arima'."
 
+        # -------------------------------
+        # Guardado automático a CSV
+        # -------------------------------
+        os.makedirs(save_dir, exist_ok=True)
+        # Rango para nombre de archivo
+        start_str = pd.to_datetime(out_df["fecha"].min()).strftime("%Y%m%d_%H%M")
+        end_str   = pd.to_datetime(out_df["fecha"].max()).strftime("%Y%m%d_%H%M")
+        timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+
+        filename = f"pred_{model}_{column}_{start_str}_to_{end_str}_{timestamp}.csv"
+        out_path = os.path.join(save_dir, filename)
+
+        # Guardar solo dos columnas solicitadas
+        out_df[["fecha", "MW_pred"]].to_csv(out_path, index=False)
+
+        # Mostrar tabla (en consola) y confirmar ruta
+        pd.set_option("display.max_rows", None)
+        print("\n📈 Predicciones futuras:\n")
+        print(out_df[["fecha", "MW_pred"]].to_string(index=False))
+        print(f"\n💾 Guardado en: {out_path}")
+
+        return f"Predicción {model.upper()} completada ({len(out_df)} puntos). Archivo: {out_path}"
+
     except Exception as e:
         return f"Error durante la predicción: {e}"
+
 
 
 
