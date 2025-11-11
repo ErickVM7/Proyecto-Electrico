@@ -50,6 +50,22 @@ except Exception as e:
 def final_answer(text: str) -> str:
     return text
 
+
+tool_final_answer = {
+  'type': 'function',
+  'function': {
+    'name': 'final_answer',
+    'description': 'Devuelve una respuesta en lenguaje natural al usuario',
+    'parameters': {
+      'type': 'object',
+      'required': ['text'],
+      'properties': {
+        'text': {'type':'string', 'description':'respuesta en lenguaje natural'}
+      }
+    }
+  }
+}
+
 def is_valid_python(code: str) -> bool:
     try:
         ast.parse(code)
@@ -83,6 +99,46 @@ def code_exec(code: str) -> str:
             print(f"Error: {e}")
     return output.getvalue()
 
+
+
+tool_code_exec = {
+  'type':'function',
+  'function':{
+    'name': 'code_exec',
+    'description': 'Ejecuta código Python. Siempre usar print() para mostrar la salida.',
+    'parameters': {
+      'type': 'object', 
+      'required': ['code'],
+      'properties': {
+        'code': {'type':'str', 'description':'código Python a ejecutar'},
+      }
+    }
+  }
+}
+
+
+
+def normalize_plot_args(t_inputs):
+    """
+    Normaliza los argumentos para plot_data y corrige errores comunes del modelo.
+    """
+    if not isinstance(t_inputs, dict):
+        return t_inputs
+    
+    # Asegurar que "columns" sea lista
+    if "columns" in t_inputs:
+        if isinstance(t_inputs["columns"], str):
+            try:
+                # Convierte "['MW']" → ["MW"]
+                t_inputs["columns"] = json.loads(t_inputs["columns"].replace("'", '"'))
+            except Exception:
+                # Si falla, convierte a lista simple
+                t_inputs["columns"] = [t_inputs["columns"]]
+        elif t_inputs["columns"] is None:
+            t_inputs["columns"] = []
+    
+    return t_inputs
+
 def plot_data(columns=None, start_date=None, end_date=None, title="Gráfico de datos"):
     try:
         df = dtf.copy()
@@ -105,19 +161,14 @@ def plot_data(columns=None, start_date=None, end_date=None, title="Gráfico de d
 
 
 
-import os
-
-def predict_data(model="prophet", column=None, horizon=None, end_date=None, save_dir="predicciones"):
+def predict_data(model="prophet", column=None, horizon=None, end_date=None):
     """
-    Predice valores de 'column' usando Prophet o SARIMA y guarda automáticamente un CSV con:
-    columnas = ['fecha', 'MW_pred'].
-    
-    Parámetros:
-      - model: 'prophet' o 'arima'
-      - column: nombre de la columna (ej. 'MW')
-      - horizon: días de predicción (int o texto como '2 días'). Si es None y no hay end_date -> 1 día (96 pasos)
-      - end_date: fecha final 'YYYY-MM-DD' para predicción hasta ese día
-      - save_dir: carpeta donde se guardará el CSV (por defecto 'predicciones')
+    Genera predicciones de series de tiempo usando Prophet o SARIMA.
+    - model: "prophet" o "arima"
+    - column: nombre de la columna a predecir (ej. "MW")
+    - horizon: número de días o texto (ej. "2 días", "10 days")
+    - end_date: fecha final (YYYY-MM-DD)
+    El modelo ahora predice exactamente lo que el usuario pida, sin límite artificial.
     """
     try:
         df = dtf.copy()
@@ -233,6 +284,32 @@ def predict_data(model="prophet", column=None, horizon=None, end_date=None, save
 
 
 
+
+tool_predict_data = {
+  'type': 'function',
+  'function': {
+    'name': 'predict_data',
+    'description': 'Genera predicciones de series de tiempo con Prophet o ARIMA. Siempre grafica los valores futuros junto con los datos históricos y devuelve un resumen de los últimos valores predichos.',
+    'parameters': {
+      'type': 'object',
+      'properties': {
+        'model': {
+          'type': 'string',
+          'description': 'Modelo de predicción a usar: "prophet" o "arima".'
+        },
+        'column': {
+          'type': 'string',
+          'description': 'Nombre de la columna a predecir'
+        },
+        'horizon': {
+          'type': 'integer',
+          'description': 'Horizonte de predicción en días.'
+        }
+      },
+      'required': ['model', 'column']
+    }
+  }
+}
 
 # =============================
 # Diccionario de herramientas
@@ -373,6 +450,61 @@ def use_tool(agent_res: dict, dic_tools: dict) -> dict:
 
     return {"res": res, "tool_used": t_name, "inputs_used": t_inputs}
 
+
+
+def run_agent(llm, messages, available_tools):
+    tool_used, local_memory = '', ''
+    used_compute = False
+
+    while tool_used != 'final_answer':
+        try:
+            agent_res = ollama.chat(
+                model=llm, 
+                messages=messages, 
+                #format="json", 
+                tools=[v for v in available_tools.values()]
+            )
+
+            dic_res = use_tool(agent_res, dic_tools)
+            res, tool_used, inputs_used = dic_res["res"], dic_res["tool_used"], dic_res["inputs_used"]
+
+          
+            if tool_used in ("code_exec", "plot_data"):
+                used_compute = True
+
+            user_query = messages[-1]["content"].lower()
+            needs_compute = any(word in user_query for word in [
+                "promedio", "media", "máximo", "mínimo", "suma", "resta",
+                "gráfico", "grafica", "plot", "visualiza", "filtra",
+                "porcentaje", "calcula", "valor", "estadística", "histograma", "error", 
+            ])
+
+            if tool_used == "final_answer" and needs_compute and not used_compute:
+                print("⚠️ > El modelo intentó responder sin calcular. Reintentando...")
+                messages.append({
+                    "role": "user", 
+                    "content": "Debes usar code_exec o plot_data antes de final_answer."
+                })
+                tool_used = ""
+                continue
+
+        except Exception as e:
+            print("⚠️ >", e)
+            res = f"Intenté usar {tool_used} pero falló. Intentaré otra cosa."
+            messages.append({"role": "assistant", "content": res})
+
+        if tool_used not in ['', 'final_answer']:
+            # Agregar al historial de memoria
+            local_memory += f"\nTool used: {tool_used}.\nInput used: {inputs_used}.\nOutput: {res}"
+            messages.append({"role": "assistant", "content": f"Resultado: {res}"})
+            available_tools.pop(tool_used, None)
+            if len(available_tools) == 1:
+                messages.append({"role": "user", "content": "ahora activa la herramienta final_answer."})
+
+        if tool_used == '':
+            break
+
+    return res
 
 # =============================
 # Bucle principal
