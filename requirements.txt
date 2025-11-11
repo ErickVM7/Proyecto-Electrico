@@ -11,6 +11,5 @@ duckduckgo-search
 ddgs
 DDGS
 requests
-#io
 datetime
 pandasai

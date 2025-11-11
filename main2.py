@@ -8,6 +8,7 @@ from statsmodels.tsa.arima.model import ARIMA
 from prophet import Prophet
 import ollama
 from statsmodels.tsa.statespace.sarimax import SARIMAX
+import os
 
 # =============================
 # Configuración del modelo
@@ -49,6 +50,22 @@ except Exception as e:
 def final_answer(text: str) -> str:
     return text
 
+
+tool_final_answer = {
+  'type': 'function',
+  'function': {
+    'name': 'final_answer',
+    'description': 'Devuelve una respuesta en lenguaje natural al usuario',
+    'parameters': {
+      'type': 'object',
+      'required': ['text'],
+      'properties': {
+        'text': {'type':'string', 'description':'respuesta en lenguaje natural'}
+      }
+    }
+  }
+}
+
 def is_valid_python(code: str) -> bool:
     try:
         ast.parse(code)
@@ -82,6 +99,46 @@ def code_exec(code: str) -> str:
             print(f"Error: {e}")
     return output.getvalue()
 
+
+
+tool_code_exec = {
+  'type':'function',
+  'function':{
+    'name': 'code_exec',
+    'description': 'Ejecuta código Python. Siempre usar print() para mostrar la salida.',
+    'parameters': {
+      'type': 'object', 
+      'required': ['code'],
+      'properties': {
+        'code': {'type':'str', 'description':'código Python a ejecutar'},
+      }
+    }
+  }
+}
+
+
+
+def normalize_plot_args(t_inputs):
+    """
+    Normaliza los argumentos para plot_data y corrige errores comunes del modelo.
+    """
+    if not isinstance(t_inputs, dict):
+        return t_inputs
+    
+    # Asegurar que "columns" sea lista
+    if "columns" in t_inputs:
+        if isinstance(t_inputs["columns"], str):
+            try:
+                # Convierte "['MW']" → ["MW"]
+                t_inputs["columns"] = json.loads(t_inputs["columns"].replace("'", '"'))
+            except Exception:
+                # Si falla, convierte a lista simple
+                t_inputs["columns"] = [t_inputs["columns"]]
+        elif t_inputs["columns"] is None:
+            t_inputs["columns"] = []
+    
+    return t_inputs
+
 def plot_data(columns=None, start_date=None, end_date=None, title="Gráfico de datos"):
     try:
         df = dtf.copy()
@@ -103,119 +160,229 @@ def plot_data(columns=None, start_date=None, end_date=None, title="Gráfico de d
         return f"Error al graficar: {e}"
 
 
+tool_plot_data = {
+  'type': 'function',
+  'function': {
+    'name': 'plot_data',
+    'description': 'Genera un gráfico del dataset dtf usando matplotlib.',
+    'parameters': {
+      'type': 'object',
+      'properties': {
+        'columns': {
+          'type': 'array',
+          'items': {'type': 'string'},
+          'description': 'Lista de columnas a graficar. Si no se da, se grafican todas.'
+        },
+        'start_date': {
+          'type':'string',
+          'description':'Fecha de inicio en formato YYYY-MM-DD (opcional)'
+        },
+        'end_date': {
+          'type':'string',
+          'description':'Fecha de fin en formato YYYY-MM-DD (opcional)'
+        },
+        'title': {
+          'type':'string',
+          'description':'Título del gráfico'
+        }
+      }
+    }
+  }
+}
 
-def predict_data(model="prophet", column=None, horizon=None, end_date=None):
+
+def normalize_csv_args(t_inputs):
     """
-    Genera predicciones de series de tiempo usando Prophet o SARIMA.
-    - model: "prophet" o "arima"
-    - column: nombre de la columna a predecir (ej. "MW")
-    - horizon: número de días o texto (ej. "2 días", "10 days")
-    - end_date: fecha final (YYYY-MM-DD)
-    El modelo ahora predice exactamente lo que el usuario pida, sin límite artificial.
+    Normaliza los argumentos que llegan a load_csv para que siempre terminen
+    como {"path": "archivo.csv"} válido.
+    Si no se puede normalizar, devuelve None.
+    """
+    # Caso directo: {"path": "archivo.csv"}
+    if isinstance(t_inputs, dict) and "path" in t_inputs and isinstance(t_inputs["path"], str):
+        candidate = t_inputs["path"].strip()
+        # Caso especial: viene como "{'path': 'datos_limpios.csv'}"
+        if candidate.startswith("{") and "path" in candidate:
+            try:
+                inner = json.loads(candidate.replace("'", '"'))
+                return {"path": inner["path"]}
+            except Exception:
+                return None
+        # Caso válido normal
+        if candidate not in ["{", "}", ")", ""]:
+            return {"path": candidate}
+        return None
+
+    # Caso {"path": {"value": "archivo.csv"}} o similar
+    if isinstance(t_inputs, dict) and "path" in t_inputs and isinstance(t_inputs["path"], dict):
+        inner = t_inputs["path"]
+        if "value" in inner:
+            return {"path": inner["value"]}
+        if "file_path" in inner:
+            return {"path": inner["file_path"]}
+        if "path" in inner:
+            return {"path": inner["path"]}
+
+    # Caso string : "archivo.csv"
+    if isinstance(t_inputs, str):
+        candidate = t_inputs.strip().strip("{}()")
+        if candidate != "":
+            return {"path": candidate}
+        return None
+
+    # Si no se reconoce → error
+    return None
+
+def predict_data(model="prophet", column=None, horizon=None, end_date=None, save_dir="predicciones"):
+    """
+    Predice valores de 'column' usando Prophet o SARIMA y guarda automáticamente un CSV con:
+    columnas = ['fecha', 'MW_pred'].
+    
+    Parámetros:
+      - model: 'prophet' o 'arima'
+      - column: nombre de la columna (ej. 'MW')
+      - horizon: días de predicción (int o texto como '2 días'). Si es None y no hay end_date -> 1 día (96 pasos)
+      - end_date: fecha final 'YYYY-MM-DD' para predicción hasta ese día
+      - save_dir: carpeta donde se guardará el CSV (por defecto 'predicciones')
     """
     try:
         df = dtf.copy()
         if column is None or column not in df.columns:
             return f"Error: debes especificar una columna válida. Columnas disponibles: {list(df.columns)}"
 
-        # Preparar datos base
+        # Datos base
         df = df[[column]].dropna().reset_index()
         df.columns = ["ds", "y"]
         freq = "15min"
         last_date = df["ds"].max()
 
         # -------------------------------
-        # 🔹 Determinar horizonte de predicción
+        # Determinar horizonte de predicción (pasos)
         # -------------------------------
-        steps = 96  # valor por defecto (1 día)
+        steps = 96  # default 1 día
         if horizon:
             if isinstance(horizon, str):
-                # Captura expresiones como “2 días”, “5 day”, “10 días”, etc.
-                match = re.findall(r"\d+", horizon)
-                days = int(match[0]) if match else 1
-                steps = days * 96
+                nums = re.findall(r"\d+", horizon)
+                days = int(nums[0]) if nums else 1
+                steps = max(1, days * 96)
             elif isinstance(horizon, int):
-                steps = horizon * 96
-        elif end_date:
+                # Interpretamos como días
+                steps = max(1, horizon * 96)
+        if end_date and (not horizon or isinstance(horizon, str) and re.match(r"^\d{4}-\d{2}-\d{2}$", horizon)):
             try:
                 target_date = pd.to_datetime(end_date)
                 delta = target_date - last_date
                 if delta.total_seconds() <= 0:
                     return f"La fecha {end_date} ya está incluida en los datos."
-                steps = int(delta.total_seconds() / (15 * 60))
+                steps = max(1, int(delta.total_seconds() / (15 * 60)))
             except Exception as e:
                 return f"Error interpretando end_date: {e}"
 
-        if steps <= 0:
-            return "Error: el horizonte calculado no puede ser cero o negativo."
+        # -------------------------------
+        # Modelos
+        # -------------------------------
+        model = model.lower()
 
-        # -------------------------------
-        # 🔹 PROFET
-        # -------------------------------
-        if model.lower() == "prophet":
+        if model == "prophet":
             m = Prophet(daily_seasonality=True)
             m.fit(df)
 
             future = m.make_future_dataframe(periods=steps, freq=freq)
             forecast = m.predict(future)
             forecast_pred = forecast[forecast["ds"] > last_date][["ds", "yhat"]]
+            forecast_pred = forecast_pred.rename(columns={"ds": "fecha", "yhat": "MW_pred"})
 
-            # Graficar solo predicciones
+            # Gráfico solo de predicciones
             plt.figure(figsize=(10, 5))
-            plt.plot(forecast_pred["ds"], forecast_pred["yhat"], "o-", color="darkorange", label="Predicción (Prophet)")
-            plt.title(f"Predicción Prophet para {column} ({steps//96} día{'s' if steps>96 else ''}, {steps} pasos)")
+            plt.plot(forecast_pred["fecha"], forecast_pred["MW_pred"], "o-", label="Predicción (Prophet)")
+            plt.title(f"Predicción Prophet para {column} ({steps} pasos, {steps//96} día(s))")
             plt.xlabel("Fecha")
             plt.ylabel(column)
             plt.grid(True)
             plt.legend()
             plt.show()
 
-            pd.set_option("display.max_rows", None)
-            print("\n📈 Predicciones futuras:\n")
-            print(forecast_pred.to_string(index=False))
-            return f"Predicción Prophet completada ({len(forecast_pred)} puntos, hasta {steps//96} día{'s' if steps>96 else ''})."
+            out_df = forecast_pred.copy()
 
-        # -------------------------------
-        # 🔹 SARIMA
-        # -------------------------------
-        elif model.lower() == "arima":
-            from statsmodels.tsa.statespace.sarimax import SARIMAX
-
-            # Limitar datos si la serie es muy grande (solo para evitar desbordes de memoria)
-            df_use = df.tail(96 * 30) if len(df) > 10000 else df.copy()  # últimos 30 días
+        elif model == "arima":
+            # Reducimos a últimos ~30 días si hay demasiados datos (memoria)
+            df_use = df.tail(96 * 30) if len(df) > 10000 else df.copy()
             df_use.set_index("ds", inplace=True)
 
-            # Entrenar modelo SARIMA
-            model_fit = SARIMAX(df_use["y"], order=(2, 1, 2), seasonal_order=(1, 0, 1, 96)).fit(disp=False)
+            sarimax = SARIMAX(df_use["y"], order=(2, 1, 2), seasonal_order=(1, 0, 1, 96)).fit(disp=False)
 
-            # Generar fechas futuras y predicciones
             future_dates = pd.date_range(last_date, periods=steps + 1, freq=freq)[1:]
-            forecast = model_fit.forecast(steps=steps)
-            forecast_df = pd.DataFrame({"ds": future_dates, "yhat": forecast})
+            forecast_vals = sarimax.forecast(steps=steps)
+            forecast_df = pd.DataFrame({"fecha": future_dates, "MW_pred": forecast_vals})
 
-            # Graficar
+            # Gráfico
             plt.figure(figsize=(10, 5))
-            plt.plot(forecast_df["ds"], forecast_df["yhat"], "o-", color="mediumseagreen", label="Predicción (SARIMA)")
-            plt.title(f"Predicción SARIMA para {column} ({steps//96} día{'s' if steps>96 else ''}, {steps} pasos)")
+            plt.plot(forecast_df["fecha"], forecast_df["MW_pred"], "o-", label="Predicción (SARIMA)")
+            plt.title(f"Predicción SARIMA para {column} ({steps} pasos, {steps//96} día(s))")
             plt.xlabel("Fecha")
             plt.ylabel(column)
             plt.grid(True)
             plt.legend()
             plt.show()
 
-            pd.set_option("display.max_rows", None)
-            print("\n📈 Predicciones futuras:\n")
-            print(forecast_df.to_string(index=False))
-            return f"Predicción SARIMA completada ({len(forecast_df)} puntos, hasta {steps//96} día{'s' if steps>96 else ''})."
+            out_df = forecast_df.copy()
 
         else:
             return "Error: modelo no reconocido. Usa 'prophet' o 'arima'."
+
+        # -------------------------------
+        # Guardado automático a CSV
+        # -------------------------------
+        os.makedirs(save_dir, exist_ok=True)
+        # Rango para nombre de archivo
+        start_str = pd.to_datetime(out_df["fecha"].min()).strftime("%Y%m%d_%H%M")
+        end_str   = pd.to_datetime(out_df["fecha"].max()).strftime("%Y%m%d_%H%M")
+        timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+
+        filename = f"pred_{model}_{column}_{start_str}_to_{end_str}_{timestamp}.csv"
+        out_path = os.path.join(save_dir, filename)
+
+        # Guardar solo dos columnas solicitadas
+        out_df[["fecha", "MW_pred"]].to_csv(out_path, index=False)
+
+        # Mostrar tabla (en consola) y confirmar ruta
+        pd.set_option("display.max_rows", None)
+        print("\n📈 Predicciones futuras:\n")
+        print(out_df[["fecha", "MW_pred"]].to_string(index=False))
+        print(f"\n💾 Guardado en: {out_path}")
+
+        return f"Predicción {model.upper()} completada ({len(out_df)} puntos). Archivo: {out_path}"
 
     except Exception as e:
         return f"Error durante la predicción: {e}"
 
 
 
+
+tool_predict_data = {
+  'type': 'function',
+  'function': {
+    'name': 'predict_data',
+    'description': 'Genera predicciones de series de tiempo con Prophet o ARIMA. Siempre grafica los valores futuros junto con los datos históricos y devuelve un resumen de los últimos valores predichos.',
+    'parameters': {
+      'type': 'object',
+      'properties': {
+        'model': {
+          'type': 'string',
+          'description': 'Modelo de predicción a usar: "prophet" o "arima".'
+        },
+        'column': {
+          'type': 'string',
+          'description': 'Nombre de la columna a predecir'
+        },
+        'horizon': {
+          'type': 'integer',
+          'description': 'Horizonte de predicción en días.'
+        }
+      },
+      'required': ['model', 'column']
+    }
+  }
+}
 
 # =============================
 # Diccionario de herramientas
@@ -356,6 +523,61 @@ def use_tool(agent_res: dict, dic_tools: dict) -> dict:
 
     return {"res": res, "tool_used": t_name, "inputs_used": t_inputs}
 
+
+
+def run_agent(llm, messages, available_tools):
+    tool_used, local_memory = '', ''
+    used_compute = False
+
+    while tool_used != 'final_answer':
+        try:
+            agent_res = ollama.chat(
+                model=llm, 
+                messages=messages, 
+                #format="json", 
+                tools=[v for v in available_tools.values()]
+            )
+
+            dic_res = use_tool(agent_res, dic_tools)
+            res, tool_used, inputs_used = dic_res["res"], dic_res["tool_used"], dic_res["inputs_used"]
+
+          
+            if tool_used in ("code_exec", "plot_data"):
+                used_compute = True
+
+            user_query = messages[-1]["content"].lower()
+            needs_compute = any(word in user_query for word in [
+                "promedio", "media", "máximo", "mínimo", "suma", "resta",
+                "gráfico", "grafica", "plot", "visualiza", "filtra",
+                "porcentaje", "calcula", "valor", "estadística", "histograma", "error", 
+            ])
+
+            if tool_used == "final_answer" and needs_compute and not used_compute:
+                print("⚠️ > El modelo intentó responder sin calcular. Reintentando...")
+                messages.append({
+                    "role": "user", 
+                    "content": "Debes usar code_exec o plot_data antes de final_answer."
+                })
+                tool_used = ""
+                continue
+
+        except Exception as e:
+            print("⚠️ >", e)
+            res = f"Intenté usar {tool_used} pero falló. Intentaré otra cosa."
+            messages.append({"role": "assistant", "content": res})
+
+        if tool_used not in ['', 'final_answer']:
+            # Agregar al historial de memoria
+            local_memory += f"\nTool used: {tool_used}.\nInput used: {inputs_used}.\nOutput: {res}"
+            messages.append({"role": "assistant", "content": f"Resultado: {res}"})
+            available_tools.pop(tool_used, None)
+            if len(available_tools) == 1:
+                messages.append({"role": "user", "content": "ahora activa la herramienta final_answer."})
+
+        if tool_used == '':
+            break
+
+    return res
 
 # =============================
 # Bucle principal
