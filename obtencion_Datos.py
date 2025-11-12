@@ -8,8 +8,8 @@ url_base = "https://apps.grupoice.com/CenceWeb/data/sen/csv/DemandaMW" #las urls
 intervalo = 15 #se toman cada 15 minutos
 
 # Rango de fechas
-fecha_inicio = datetime(2024, 8, 26)  # Cambiar fecha inicial
-fecha_fin = datetime(2025, 8, 26)     # Cambiar fecha final
+fecha_inicio = datetime(2025, 8, 27)  # Cambiar fecha inicial
+fecha_fin = datetime(2025, 8, 27)     # Cambiar fecha final
 
 dfs = [] #lista vacia
 
@@ -34,7 +34,7 @@ while fecha <= fecha_fin:
 # Unir todos los días en un dataset
 if dfs:
     data = pd.concat(dfs, ignore_index=True)
-    data.to_csv("datos_limpios.csv", index=False)
+    data.to_csv("DatosReales1dias.csv", index=False)
     print("Exito: Datos guardados en datos_limpios.csv")
 else:
     print("Error: No se descargaron datos.")
