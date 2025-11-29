@@ -1,20 +1,92 @@
-# Proyecto Eléctrico - Sistema de análisis y predicción de series
+# Proyecto Eléctrico — Sistema de análisis y predicción de series de tiempo
+Erick Vargas Monge C08215
 
-Los archivos incluidos en el repositorio original son:
+Este proyecto implementa un **agente de inteligencia artificial basado en modelos de lenguaje (LLM)** capaz de:
 
-- `requirements.txt`: Especificación de las dependencias de paquetes de Python.
-- `problemas.txt`: Problemas encontrados en el desarrollo del proyecto.
-- `env_prueba.py`: Archivo python para comprobar la correcta instalación del entorno virtual y sus respectivas librerías.
-- `system_Mauro.py`: Archivo python para ejecutar el sistema base propuesto por Mauro Di Pietro.
-  
-- `archivos/datos_cence`:  Datos de CENCE de los últimos tres años
-- `archivos/ProyectoElectrico_PrediccionEnTiempoReal.pdf`: Enunciado y objetivo del proyecto.
- 
-- `LICENSE`: Licencia Creative Commons [Zero v1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/deed.es) de derechos de autor.
-- `.gitignore`: Archivos y directorios que Git ignora para hacer control de versiones y para subir a un repositorio remoto. Típicamente son archivos con datos privados o específicos del sistema operativo local, que no deben reproducirse en el repositorio de otros desarrolladores.
-- `_pycache_`: Directorio automático de python que almacena los archivos de código de bytes compilados.
-- `.venv`: Configuración del entorno virtual
+- Analizar series de tiempo de consumo eléctrico nacional  
+- Generar gráficos y estadísticas  
+- Ejecutar código Python bajo demanda  
+- Realizar predicciones (1–3 días) usando regresores especializados (Prophet y ARIMA)  
+- Funcionar completamente en local, sin GPU, sin API keys y sin conexión a la nube  
 
+El sistema se desarrolló siguiendo el enfoque de agentes descrito por **Mauro Di Pietro** y aplicando el enunciado del **Proyecto Eléctrico II-2025** del profesor Marvin Coto.  
+Este enfoque permite que un modelo de lenguaje no solo responda preguntas, sino que ejecute herramientas especializadas y realice cálculos reales sobre un dataset cargado en memoria.
+
+---
+
+## Objetivo General
+
+Construir un sistema automático que analice y prediga series de tiempo de consumo energético nacional utilizando modelos locales y herramientas de código abierto.
+
+---
+
+## ¿Cómo funciona el agente?
+
+El agente combina un modelo de lenguaje local (por ejemplo, `qwen2.5:7b`) con un conjunto de herramientas en Python:
+
+| Herramienta | Función |
+|------------|---------|
+| **`code_exec`** | Ejecuta código Python sobre el dataframe cargado |
+| **`plot_data`** | Genera gráficos (tendencias, días específicos, comparaciones) |
+| **`predict_data`** | Produce predicciones usando Prophet o ARIMA |
+| **`final_answer`** | Devuelve respuestas explicativas en lenguaje natural |
+
+**Flujo de trabajo del agente**  
+1. El usuario realiza una consulta en lenguaje natural.  
+2. El LLM decide qué herramienta debe usarse.  
+3. La herramienta se ejecuta (cálculo, gráfico, predicción).  
+4. El resultado vuelve al LLM.  
+5. El agente continúa hasta entregar una respuesta final.  
+
+
+## Estructura del Proyecto
+
+```plaintext
+Proyecto-Electrico/
+│
+├── main.py                     # Agente principal
+├── main2.py                    # Variante enfocada en datos del ICE
+├── system_Mauro.py             # Adaptación del sistema original de Mauro Di Pietro
+│
+├── obtencion_Datos.py          # Descarga y limpieza de datos
+├── revisión_Datos.py           # Validación del dataset
+├── env_prueba.py               # Verificación del entorno virtual
+│
+├── datos_limpios.csv           # Dataset listo para análisis
+│
+├── predicciones/
+│   ├── Pruebas/
+│   │   ├── DatosReales/        # Datos reales para evaluación
+│   │   ├── Pred_ARIMA_*.csv    # Predicciones ARIMA
+│   │   ├── Pred_Prophet_*.csv  # Predicciones Prophet
+│   │   └── ErrorPredic.py      # Cálculo de MAE, RMSE, MAPE
+│
+├── archivos/
+│   ├── datos_cence.csv
+│   └── ProyectoElectrico_PrediccionEnTiempoReal.pdf
+│
+├── requirements.txt
+├── README.md
+└── .venv/
+
+```
+
+## Requisitos
+
+- **Python 3.11+**
+- **Ollama** instalado   https://ollama.com/download
+- Paquetes listados en `requirements.txt`
+
+
+
+## Instalación
+
+### 1️ Clonar el repositorio
+
+```bash
+git clone https://github.com/ErickVM7/Proyecto-Electrico
+cd Proyecto-Electrico
+```
 ## Documentación e instrucciones del proyecto
 
 El enunciado del proyecto y sus objetivos están disponibles en el pdf:
@@ -130,28 +202,3 @@ El artículo concluye que este enfoque democratiza el análisis de datos: cualqu
     -   Si se usa code_exec: ejecuta Python y devuelve la salida de este código
     -   Si se usa search_web: devuelve un resumen de noticias
         relevantes.
-
-
-## Estado actual del proyecto
-
-Este repositorio contiene la primera etapa del proyecto (**Tarea 1 y 2**), que corresponde a:
-
-- Instalación y configuración del entorno virtual de Python.
-- Instalación y prueba de Ollama en local.
-- Implementación y prueba del sistema base propuesto por Mauro Di Pietro (`system_Mauro.py`), 
-  el cual permite interactuar con un agente que procesa series de tiempo simples y dataframes en memoria.
-
-- Obtención de datos ICE (CENCE). (`obtencionDatos.py`)
-- Convertir los datos a un archivo .csv bien estructurado. (`datos_limpios.csv`)
-- Estandarizar formato de fechas y valores. (`datos_limpios.csv`)
-- Validar que los datos no tengan errores o vacíos.
-
-
-
-## Para ejecutar el proyecto
-
-
-
-
-
-
